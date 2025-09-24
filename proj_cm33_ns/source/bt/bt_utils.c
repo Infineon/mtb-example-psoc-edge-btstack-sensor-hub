@@ -1,0 +1,275 @@
+/*******************************************************************************
+* File Name: bt_utils.c
+*
+* Description: This file contains NVM memory access and helper functions.
+*
+* Related Document: See README.md
+*
+********************************************************************************
+* Copyright 2024-2025, Cypress Semiconductor Corporation (an Infineon company) or
+* an affiliate of Cypress Semiconductor Corporation.  All rights reserved.
+*
+* This software, including source code, documentation and related
+* materials ("Software") is owned by Cypress Semiconductor Corporation
+* or one of its affiliates ("Cypress") and is protected by and subject to
+* worldwide patent protection (United States and foreign),
+* United States copyright laws and international treaty provisions.
+* Therefore, you may use this Software only as provided in the license
+* agreement accompanying the software package from which you
+* obtained this Software ("EULA").
+* If no EULA applies, Cypress hereby grants you a personal, non-exclusive,
+* non-transferable license to copy, modify, and compile the Software
+* source code solely for use in connection with Cypress's
+* integrated circuit products.  Any reproduction, modification, translation,
+* compilation, or representation of this Software except as specified
+* above is prohibited without the express written permission of Cypress.
+*
+* Disclaimer: THIS SOFTWARE IS PROVIDED AS-IS, WITH NO WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING, BUT NOT LIMITED TO, NONINFRINGEMENT, IMPLIED
+* WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. Cypress
+* reserves the right to make changes to the Software without notice. Cypress
+* does not assume any liability arising out of the application or use of the
+* Software or any product or circuit described in the Software. Cypress does
+* not authorize its products for use in any products where a malfunction or
+* failure of the Cypress product may reasonably be expected to result in
+* significant property damage, injury or death ("High Risk Product"). By
+* including Cypress's product in a High Risk Product, the manufacturer
+* of such system or application assumes all risk of such use and in doing
+* so agrees to indemnify Cypress against all liability.
+*******************************************************************************/
+
+/*******************************************************************************
+ * Header file includes
+ ******************************************************************************/
+#include "wiced_bt_trace.h"
+#include "wiced_memory.h"
+#include "bt_utils.h"
+#include "mtb_kvstore.h"
+#include "stdlib.h"
+#include "retarget_io_init.h"
+
+/*******************************************************************************
+* Macros
+*******************************************************************************/
+#define NVM_CONFIG_MAX_LEN                 (256U)
+#define NUM_KEYS                           (8U)
+#define MIN_PROGRAM_SIZE                   (0x200U)
+#define NVM_REGION_ZERO                    (0U)
+#define MULTIPLICATION_FACTOR              (2U)
+#define LENGTH_INVALID                     (0U)
+#define NVM_ERROR                          (0U)
+#define RRAM_NVM_DATA_NS_OFFSET            (CYMEM_CM33_0_user_nvm_OFFSET)
+
+/*******************************************************************************
+* Global Variables
+*******************************************************************************/
+uint8_t erase_buf[CY_RRAM_BLOCK_SIZE_BYTES] = {0};
+mtb_kvstore_t kvstore_obj;
+static mtb_block_storage_t* bsd;
+static mtb_block_storage_t nvm_bsd;
+static mtb_hal_nvm_t nvm_obj;
+static mtb_hal_nvm_region_info_t region_info;
+
+/*******************************************************************************
+* Function Name: get_kvstore_init_params
+********************************************************************************
+* Summary:
+* This function is used to define the bond data storage
+*         (in this case NVM).
+*
+* Parameters:
+* uint32_t *start_addr: Start Address to erase the data
+*                       from the device.
+* uint32_t *length    : Length of the data that needs to be erased
+*
+* Return:
+*  void
+*
+*******************************************************************************/
+static void get_kvstore_init_params(uint32_t *length, uint32_t *start_addr)
+ {
+     uint32_t program_size = bsd->get_program_size(bsd->context,
+             region_info.start_address);
+     program_size = (program_size > MIN_PROGRAM_SIZE) ? program_size :
+             MIN_PROGRAM_SIZE;
+     uint32_t area_size = (NUM_KEYS * program_size * MULTIPLICATION_FACTOR);
+     *start_addr = region_info.start_address + RRAM_NVM_DATA_NS_OFFSET;
+     *length = area_size;
+ }
+
+/*******************************************************************************
+* Function Name: app_kvstore_bd_init
+********************************************************************************
+* Summary:
+*  This function initializes the underlying block device.
+*******************************************************************************/
+static void app_kvstore_bd_init(void)
+{
+    mtb_hal_nvm_info_t nvm_info;
+    mtb_hal_nvm_setup(&nvm_obj,NULL);
+    mtb_hal_nvm_get_info(&nvm_obj, &nvm_info);
+    mtb_block_storage_create_hal_nvm(&nvm_bsd, &nvm_obj);
+    bsd = &nvm_bsd;
+    region_info = nvm_info.regions[NVM_REGION_ZERO];
+}
+
+/*******************************************************************************
+* Function Name: bt_app_nvm_init
+********************************************************************************
+* Summary:
+* This function Initialize the NVM.
+*
+* Parameters:
+*  None
+*
+* Return:
+*  cy_rslt_t : returns the result status.
+*
+*******************************************************************************/
+cy_rslt_t bt_app_nvm_init(void)
+{
+       cy_rslt_t rslt;
+       uint32_t  start_addr, length;
+       app_kvstore_bd_init();
+       get_kvstore_init_params(&length, &start_addr);
+
+       /*Initialize kv-store library*/
+       rslt = mtb_kvstore_init(&kvstore_obj, start_addr, length, bsd,NULL,NULL);
+
+       /*Check if the kv-store initialization was successful*/
+       if (CY_RSLT_SUCCESS != rslt)
+       {
+           printf("failed to initialize kv-store \n");
+           handle_app_error();
+       }
+
+       return rslt;
+}
+
+/*******************************************************************************
+* Function Name: bt_app_nvm_read
+********************************************************************************
+* Summary:
+*  This function reads data from the NVM.
+*
+* Parameters:
+*  key : pointer to key value
+*  len : data length
+*  buf : data buffer
+*
+* Return:
+*  uint32_t : returns the length of data size.
+*
+*******************************************************************************/
+uint32_t bt_app_nvm_read(uint8_t* key, uint32_t len, uint8_t* buf)
+{
+    cy_rslt_t result = CY_RSLT_SUCCESS;
+
+    if (len >= NVM_CONFIG_MAX_LEN)
+    {
+        printf("NVM read failed reached maximum length %d!", (uint16_t)len);
+        len = LENGTH_INVALID;
+    }
+    else
+    {
+        result = mtb_kvstore_read(&kvstore_obj, (const char*)key,
+                (uint8_t*)buf, &len);
+        if(CY_RSLT_SUCCESS != result)
+        {
+            printf("Notify interval not stored in NVM!\n");
+            len = LENGTH_INVALID;
+        }
+    }
+    return (len);
+}
+
+/*******************************************************************************
+* Function Name: bt_app_nvm_write
+********************************************************************************
+* Summary:
+* This function write data to NVM.
+*
+* Parameters:
+*  key : pointer to key value
+*  len : data length
+*  buf : data buffer
+*
+* Return:
+*  uint32_t : returns the length of data size.
+*
+*******************************************************************************/
+uint32_t bt_app_nvm_write(uint8_t* key, uint32_t len, uint8_t* buf)
+{
+    cy_rslt_t result = CY_RSLT_SUCCESS;
+
+    if (len >= NVM_CONFIG_MAX_LEN)
+    {
+        printf("NVM write failed reached maximum length %d!", (uint16_t)len);
+        len = LENGTH_INVALID;
+    }
+    else
+    {
+        result = mtb_kvstore_write(&kvstore_obj, (const char*)key,
+                (uint8_t*)buf, len);
+        if(CY_RSLT_SUCCESS != result)
+        {
+            printf("NVM write failed with error code: 0x%x\r\n", (int)result);
+            len = LENGTH_INVALID;
+        }
+    }
+    return (len);
+}
+
+/*******************************************************************************
+* Function Name: bt_app_nvm_delete
+********************************************************************************
+* Summary:
+* This function delete data from the NVM.
+*
+* Parameters:
+*  uint8_t* key
+*
+* Return:
+*  uint32_t : returns the status.
+*
+*******************************************************************************/
+uint32_t bt_app_nvm_delete(uint8_t* key)
+{
+    cy_rslt_t result = CY_RSLT_SUCCESS;
+
+    result = mtb_kvstore_delete(&kvstore_obj, (const char*)key);
+
+    if(CY_RSLT_SUCCESS != result)
+    {
+        printf("NVM delete failed with error code: 0x%x\r\n", (int)result);
+        result = NVM_ERROR;
+    }
+    return result;
+}
+
+/*******************************************************************************
+* Function Name: bt_app_nvm_reset
+********************************************************************************
+* Summary:
+* This function reset data from the NVM.
+*
+* Parameters:
+*  None
+*
+* Return:
+*  uint32_t : returns the status.
+*
+*******************************************************************************/
+uint32_t bt_app_nvm_reset(void)
+{
+    cy_rslt_t result = CY_RSLT_SUCCESS;
+
+    result = mtb_kvstore_reset(&kvstore_obj);
+
+    if(CY_RSLT_SUCCESS != result)
+    {
+        printf("NVM reset failed with error code: 0x%x\r\n", (int)result);
+        result = NVM_ERROR;
+    }
+    return result;
+}
